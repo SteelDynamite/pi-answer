@@ -5,9 +5,11 @@
  * https://github.com/mitsuhiko/agent-stuff/blob/main/extensions/answer.ts
  */
 
-import { complete, type Api, type Model, type UserMessage } from "@earendil-works/pi-ai";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { dirname, join } from "node:path";
+import { complete, completeSimple, type Api, type Model, type ProviderStreamOptions, type UserMessage } from "@earendil-works/pi-ai";
 import type { ExtensionAPI, ExtensionContext, ModelRegistry } from "@earendil-works/pi-coding-agent";
-import { BorderedLoader } from "@earendil-works/pi-coding-agent";
+import { BorderedLoader, getAgentDir } from "@earendil-works/pi-coding-agent";
 import {
 	type Component,
 	Editor,
@@ -61,21 +63,131 @@ Example output:
   ]
 }`;
 
-const CODEX_MODEL_ID = "gpt-5.3";
-const HAIKU_MODEL_ID = "claude-haiku-4-5";
+const THINKING_LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh"] as const;
+type AnswerThinking = (typeof THINKING_LEVELS)[number];
 
-async function selectExtractionModel(currentModel: Model<Api>, modelRegistry: ModelRegistry): Promise<Model<Api>> {
-	const codexModel = modelRegistry.find("openai-codex", CODEX_MODEL_ID);
-	if (codexModel) {
-		const auth = await modelRegistry.getApiKeyAndHeaders(codexModel);
-		if (auth.ok) return codexModel;
+interface AnswerSettings {
+	model?: {
+		provider: string;
+		id: string;
+	};
+	thinking?: AnswerThinking;
+}
+
+interface ExtractionFailure {
+	error: string;
+}
+
+type ExtractionUiResult = ExtractionResult | ExtractionFailure | null;
+
+function getSettingsPath(): string {
+	return join(getAgentDir(), "pi-answer.json");
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+	return typeof value === "object" && value !== null;
+}
+
+function isAnswerThinking(value: unknown): value is AnswerThinking {
+	return typeof value === "string" && THINKING_LEVELS.includes(value as AnswerThinking);
+}
+
+function parseAnswerSettings(value: unknown): AnswerSettings {
+	if (!isRecord(value)) return {};
+
+	const settings: AnswerSettings = {};
+	if (isRecord(value.model) && typeof value.model.provider === "string" && typeof value.model.id === "string") {
+		settings.model = { provider: value.model.provider, id: value.model.id };
+	}
+	if (isAnswerThinking(value.thinking)) settings.thinking = value.thinking;
+	return settings;
+}
+
+function getErrorCode(error: unknown): string | undefined {
+	return isRecord(error) && typeof error.code === "string" ? error.code : undefined;
+}
+
+async function loadAnswerSettings(): Promise<AnswerSettings> {
+	try {
+		return parseAnswerSettings(JSON.parse(await readFile(getSettingsPath(), "utf8")));
+	} catch (error) {
+		if (getErrorCode(error) === "ENOENT") return {};
+		return {};
+	}
+}
+
+async function saveAnswerSettings(settings: AnswerSettings): Promise<void> {
+	const settingsPath = getSettingsPath();
+	await mkdir(dirname(settingsPath), { recursive: true });
+	await writeFile(settingsPath, `${JSON.stringify(settings, null, 2)}\n`, "utf8");
+}
+
+function formatModel(model: Model<Api>): string {
+	return `${model.provider}/${model.id}`;
+}
+
+function sameModel(a: Model<Api> | undefined, b: Model<Api> | undefined): boolean {
+	return Boolean(a && b && a.provider === b.provider && a.id === b.id);
+}
+
+function isExtractionFailure(result: ExtractionUiResult): result is ExtractionFailure {
+	return isRecord(result) && typeof result.error === "string";
+}
+
+function buildThinkingOffOptions(
+	model: Model<Api>,
+	baseOptions: ProviderStreamOptions,
+): ProviderStreamOptions {
+	const options: ProviderStreamOptions = { ...baseOptions };
+
+	if (model.api === "anthropic-messages") {
+		options.thinkingEnabled = false;
+	} else if (model.api === "openai-codex-responses") {
+		options.reasoningEffort = "none";
+		options.reasoningSummary = null;
+	} else if (model.api === "google-generative-ai" || model.api === "google-vertex") {
+		options.thinking = { enabled: false };
 	}
 
-	const haikuModel = modelRegistry.find("anthropic", HAIKU_MODEL_ID);
-	if (!haikuModel) return currentModel;
+	return options;
+}
 
-	const auth = await modelRegistry.getApiKeyAndHeaders(haikuModel);
-	return auth.ok ? haikuModel : currentModel;
+async function completeForExtraction(
+	model: Model<Api>,
+	userMessage: UserMessage,
+	auth: { apiKey?: string; headers?: Record<string, string> },
+	signal: AbortSignal,
+	thinking: AnswerThinking,
+) {
+	const context = { systemPrompt: SYSTEM_PROMPT, messages: [userMessage] };
+	const baseOptions: ProviderStreamOptions = { apiKey: auth.apiKey, headers: auth.headers, signal };
+
+	if (thinking === "off") {
+		return complete(model, context, buildThinkingOffOptions(model, baseOptions));
+	}
+
+	return completeSimple(model, context, { ...baseOptions, reasoning: thinking });
+}
+
+async function resolveExtractionSettings(
+	ctx: ExtensionContext,
+): Promise<{ model: Model<Api>; thinking: AnswerThinking; warning?: string } | null> {
+	const settings = await loadAnswerSettings();
+	const thinking = settings.thinking ?? "off";
+	let warning: string | undefined;
+
+	if (settings.model) {
+		const savedModel = ctx.modelRegistry.find(settings.model.provider, settings.model.id);
+		if (savedModel && ctx.modelRegistry.hasConfiguredAuth(savedModel)) {
+			return { model: savedModel, thinking };
+		}
+		warning = savedModel
+			? `Saved answer model ${settings.model.provider}/${settings.model.id} has no configured auth; using current model.`
+			: `Saved answer model ${settings.model.provider}/${settings.model.id} is unavailable; using current model.`;
+	}
+
+	if (!ctx.model) return null;
+	return { model: ctx.model, thinking, warning };
 }
 
 function parseExtractionResult(text: string): ExtractionResult | null {
@@ -311,15 +423,80 @@ class QnAComponent implements Component {
 	}
 }
 
+function getAvailableModels(modelRegistry: ModelRegistry, currentModel?: Model<Api>): Model<Api>[] {
+	const models = [...modelRegistry.getAvailable()];
+	if (currentModel && !models.some((model) => sameModel(model, currentModel))) models.unshift(currentModel);
+	return models.sort((a, b) => formatModel(a).localeCompare(formatModel(b)));
+}
+
 export default function (pi: ExtensionAPI) {
-	const answerHandler = async (ctx: ExtensionContext) => {
+	const answerSettingsHandler = async (ctx: ExtensionContext) => {
 		if (!ctx.hasUI) {
-			ctx.ui.notify("answer requires interactive mode", "error");
+			ctx.ui.notify("answer-settings requires interactive mode", "error");
 			return;
 		}
 
-		if (!ctx.model) {
-			ctx.ui.notify("No model selected", "error");
+		const currentSettings = await loadAnswerSettings();
+		const modelChoices = new Map<string, Model<Api>>();
+		const useCurrentLabel = ctx.model ? `Use current model (${formatModel(ctx.model)})` : "Use current model";
+		const clearLabel = "Clear saved answer settings";
+		const cancelLabel = "Cancel";
+		const options: string[] = [];
+
+		if (ctx.model) options.push(useCurrentLabel);
+		for (const model of getAvailableModels(ctx.modelRegistry, ctx.model)) {
+			const label = `${formatModel(model)} — ${model.name}`;
+			modelChoices.set(label, model);
+			options.push(label);
+		}
+		if (currentSettings.model || currentSettings.thinking) options.push(clearLabel);
+		options.push(cancelLabel);
+
+		if (options.length === 1) {
+			ctx.ui.notify("No available models", "error");
+			return;
+		}
+
+		const modelChoice = await ctx.ui.select("Answer model", options);
+		if (!modelChoice || modelChoice === cancelLabel) {
+			ctx.ui.notify("Cancelled", "info");
+			return;
+		}
+
+		if (modelChoice === clearLabel) {
+			await saveAnswerSettings({});
+			ctx.ui.notify("Answer settings cleared", "info");
+			return;
+		}
+
+		const nextSettings: AnswerSettings = {};
+		const selectedModel = modelChoices.get(modelChoice);
+		if (selectedModel) nextSettings.model = { provider: selectedModel.provider, id: selectedModel.id };
+
+		const currentThinking = currentSettings.thinking ?? "off";
+		const thinkingOptions = THINKING_LEVELS.map((level) => (level === currentThinking ? `${level} (current)` : level));
+		const thinkingChoice = await ctx.ui.select("Answer thinking", thinkingOptions);
+		if (!thinkingChoice) {
+			ctx.ui.notify("Cancelled", "info");
+			return;
+		}
+
+		const thinking = thinkingChoice.split(" ", 1)[0];
+		if (!isAnswerThinking(thinking)) {
+			ctx.ui.notify("Invalid thinking level", "error");
+			return;
+		}
+
+		nextSettings.thinking = thinking;
+		await saveAnswerSettings(nextSettings);
+
+		const modelText = nextSettings.model ? `${nextSettings.model.provider}/${nextSettings.model.id}` : "current model";
+		ctx.ui.notify(`Answer settings saved: ${modelText}, thinking ${thinking}`, "info");
+	};
+
+	const answerHandler = async (ctx: ExtensionContext) => {
+		if (!ctx.hasUI) {
+			ctx.ui.notify("answer requires interactive mode", "error");
 			return;
 		}
 
@@ -351,14 +528,26 @@ export default function (pi: ExtensionAPI) {
 			return;
 		}
 
-		const extractionModel = await selectExtractionModel(ctx.model, ctx.modelRegistry);
-		const extractionResult = await ctx.ui.custom<ExtractionResult | null>((tui, theme, _kb, done) => {
-			const loader = new BorderedLoader(tui, theme, `Extracting questions using ${extractionModel.id}...`);
+		const extractionSettings = await resolveExtractionSettings(ctx);
+		if (!extractionSettings) {
+			ctx.ui.notify("No model selected", "error");
+			return;
+		}
+		if (extractionSettings.warning) ctx.ui.notify(extractionSettings.warning, "warning");
+
+		const extractionModel = extractionSettings.model;
+		const extractionThinking = extractionSettings.thinking;
+		const extractionResult = await ctx.ui.custom<ExtractionUiResult>((tui, theme, _kb, done) => {
+			const loader = new BorderedLoader(
+				tui,
+				theme,
+				`Extracting questions using ${formatModel(extractionModel)} (${extractionThinking})...`,
+			);
 			loader.onAbort = () => done(null);
 
-			const doExtract = async () => {
+			const doExtract = async (): Promise<ExtractionUiResult> => {
 				const auth = await ctx.modelRegistry.getApiKeyAndHeaders(extractionModel);
-				if (!auth.ok) throw new Error(auth.error);
+				if (!auth.ok) return { error: auth.error };
 
 				const userMessage: UserMessage = {
 					role: "user",
@@ -366,28 +555,46 @@ export default function (pi: ExtensionAPI) {
 					timestamp: Date.now(),
 				};
 
-				const response = await complete(
+				const response = await completeForExtraction(
 					extractionModel,
-					{ systemPrompt: SYSTEM_PROMPT, messages: [userMessage] },
-					{ apiKey: auth.apiKey, headers: auth.headers, signal: loader.signal },
+					userMessage,
+					{ apiKey: auth.apiKey, headers: auth.headers },
+					loader.signal,
+					extractionThinking,
 				);
 
 				if (response.stopReason === "aborted") return null;
+				if (response.stopReason === "error") {
+					return { error: response.errorMessage ?? "Model returned an error." };
+				}
 
 				const responseText = response.content
 					.filter((c): c is { type: "text"; text: string } => c.type === "text")
 					.map((c) => c.text)
 					.join("\n");
 
-				return parseExtractionResult(responseText);
+				const parsed = parseExtractionResult(responseText);
+				if (!parsed) {
+					const suffix = responseText.trim() ? `: ${truncateToWidth(responseText.trim(), 200)}` : ".";
+					return { error: `Model returned invalid extraction JSON${suffix}` };
+				}
+
+				return parsed;
 			};
 
-			doExtract().then(done).catch(() => done(null));
+			doExtract()
+				.then(done)
+				.catch((error) => done({ error: error instanceof Error ? error.message : String(error) }));
 			return loader;
 		});
 
 		if (extractionResult === null) {
-			ctx.ui.notify("Cancelled or could not extract questions", "info");
+			ctx.ui.notify("Cancelled", "info");
+			return;
+		}
+
+		if (isExtractionFailure(extractionResult)) {
+			ctx.ui.notify(`Could not extract questions: ${extractionResult.error}`, "error");
 			return;
 		}
 
@@ -418,6 +625,11 @@ export default function (pi: ExtensionAPI) {
 	pi.registerCommand("answer", {
 		description: "Extract questions from last assistant message into interactive Q&A",
 		handler: (_args, ctx) => answerHandler(ctx),
+	});
+
+	pi.registerCommand("answer-settings", {
+		description: "Configure the model and thinking level used by /answer",
+		handler: (_args, ctx) => answerSettingsHandler(ctx),
 	});
 
 	pi.registerShortcut("ctrl+.", {

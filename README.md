@@ -33,11 +33,15 @@ The extension:
 3. Opens an interactive Q&A UI.
 4. Sends your compiled answers back into the session.
 
-Extraction model preference:
+Extraction defaults to the current model with thinking off.
 
-1. `openai-codex/gpt-5.3` if configured
-2. `anthropic/claude-haiku-4-5` if configured
-3. current model
+Run:
+
+```text
+/answer-settings
+```
+
+Use it to save a global extraction model and thinking level. Settings are stored in `~/.pi/agent/pi-answer.json`. If the saved model is unavailable or unauthenticated, `/answer` falls back to the current model.
 
 ## Development
 
