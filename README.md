@@ -29,9 +29,10 @@ Or press `Ctrl+.`.
 The extension:
 
 1. Finds the last completed assistant message.
-2. Uses a model to extract questions as JSON.
+2. Uses a model to extract questions and optional recommended answers as JSON.
 3. Opens an interactive Q&A UI.
-4. Sends your compiled answers back into the session.
+4. Ghost-fills recommended answers when available; press Right Arrow to accept one.
+5. Sends your compiled answers back into the session.
 
 Extraction defaults to the current model with thinking off.
 

@@ -25,6 +25,7 @@ import {
 interface ExtractedQuestion {
 	question: string;
 	context?: string;
+	recommendedAnswer?: string;
 }
 
 interface ExtractionResult {
@@ -38,7 +39,8 @@ Output a JSON object with this structure:
   "questions": [
     {
       "question": "The question text",
-      "context": "Optional context that helps answer the question"
+      "context": "Optional context that helps answer the question",
+      "recommendedAnswer": "Optional concise answer the user likely wants to give"
     }
   ]
 }
@@ -48,6 +50,8 @@ Rules:
 - Keep questions in the order they appeared
 - Be concise with question text
 - Include context only when it provides essential information for answering
+- Include recommendedAnswer only when the answer is strongly implied by the conversation or a safe default is obvious
+- Keep recommendedAnswer concise and write it as the user's answer, not as an explanation
 - If no questions are found, return {"questions": []}
 
 Example output:
@@ -55,7 +59,8 @@ Example output:
   "questions": [
     {
       "question": "What is your preferred database?",
-      "context": "We can only configure MySQL and PostgreSQL because of what is implemented."
+      "context": "We can only configure MySQL and PostgreSQL because of what is implemented.",
+      "recommendedAnswer": "PostgreSQL"
     },
     {
       "question": "Should we use TypeScript or JavaScript?"
@@ -64,6 +69,9 @@ Example output:
 }`;
 
 const THINKING_LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh"] as const;
+const GHOST_CURSOR = "\x1b[7m \x1b[0m";
+const GHOST_STYLE = "\x1b[2;90m";
+const ANSI_RESET = "\x1b[0m";
 type AnswerThinking = (typeof THINKING_LEVELS)[number];
 
 interface AnswerSettings {
@@ -197,13 +205,19 @@ function parseExtractionResult(text: string): ExtractionResult | null {
 		if (jsonMatch) jsonText = jsonMatch[1].trim();
 
 		const parsed = JSON.parse(jsonText) as unknown;
-		if (
-			parsed &&
-			typeof parsed === "object" &&
-			Array.isArray((parsed as ExtractionResult).questions)
-		) {
-			return parsed as ExtractionResult;
+		if (!isRecord(parsed) || !Array.isArray(parsed.questions)) return null;
+
+		const questions: ExtractedQuestion[] = [];
+		for (const item of parsed.questions) {
+			if (!isRecord(item) || typeof item.question !== "string") continue;
+			const question: ExtractedQuestion = { question: item.question };
+			if (typeof item.context === "string" && item.context.trim()) question.context = item.context;
+			if (typeof item.recommendedAnswer === "string" && item.recommendedAnswer.trim()) {
+				question.recommendedAnswer = item.recommendedAnswer;
+			}
+			questions.push(question);
 		}
+		return { questions };
 	} catch {
 		// ignored
 	}
@@ -265,6 +279,20 @@ class QnAComponent implements Component {
 		this.invalidate();
 	}
 
+	private getCurrentRecommendation(): string | undefined {
+		const recommendation = this.questions[this.currentIndex]?.recommendedAnswer?.trim();
+		return recommendation && this.editor.getText().length === 0 ? recommendation : undefined;
+	}
+
+	private acceptRecommendation(): boolean {
+		const recommendation = this.getCurrentRecommendation();
+		if (!recommendation) return false;
+		this.editor.setText(recommendation);
+		this.invalidate();
+		this.tui.requestRender();
+		return true;
+	}
+
 	private submit(): void {
 		this.saveCurrentAnswer();
 
@@ -308,6 +336,8 @@ class QnAComponent implements Component {
 			this.cancel();
 			return;
 		}
+
+		if (matchesKey(data, Key.right) && this.acceptRecommendation()) return;
 
 		if (matchesKey(data, Key.tab)) {
 			if (this.currentIndex < this.questions.length - 1) {
@@ -401,7 +431,10 @@ class QnAComponent implements Component {
 
 		const answerPrefix = this.bold("A: ");
 		const editorWidth = contentWidth - 7;
-		const editorLines = this.editor.render(editorWidth);
+		const recommendation = this.getCurrentRecommendation();
+		const editorLines = recommendation
+			? renderGhostSuggestionLines(this.editor.render(editorWidth), editorWidth, recommendation)
+			: this.editor.render(editorWidth);
 		for (let i = 1; i < editorLines.length - 1; i++) {
 			lines.push(padToWidth(boxLine(i === 1 ? answerPrefix + editorLines[i] : "   " + editorLines[i])));
 		}
@@ -421,6 +454,17 @@ class QnAComponent implements Component {
 		this.cachedLines = lines;
 		return lines;
 	}
+}
+
+function renderGhostSuggestionLines(lines: string[], width: number, text: string): string[] {
+	const contentLineIndex = lines.length >= 3 ? 1 : lines.findIndex((line) => line.includes(GHOST_CURSOR));
+	if (contentLineIndex === -1) return lines;
+
+	const ghost = `${GHOST_STYLE}${truncateToWidth(text, Math.max(0, width - 1))}${ANSI_RESET}`;
+	const rendered = GHOST_CURSOR + ghost;
+	return lines.map((line, index) =>
+		index === contentLineIndex ? rendered + " ".repeat(Math.max(0, width - visibleWidth(rendered))) : line,
+	);
 }
 
 function getAvailableModels(modelRegistry: ModelRegistry, currentModel?: Model<Api>): Model<Api>[] {
