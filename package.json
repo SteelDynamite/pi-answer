@@ -1,0 +1,53 @@
+{
+  "name": "pi-answer",
+  "version": "0.1.0",
+  "description": "Interactive pi extension for extracting questions from the last assistant message and answering them in a Q&A UI.",
+  "type": "module",
+  "files": [
+    "index.ts",
+    "README.md",
+    "LICENSE"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/SteelDynamite/pi-answer.git"
+  },
+  "bugs": {
+    "url": "https://github.com/SteelDynamite/pi-answer/issues"
+  },
+  "homepage": "https://github.com/SteelDynamite/pi-answer#readme",
+  "engines": {
+    "node": ">=22"
+  },
+  "pi": {
+    "extensions": [
+      "./index.ts"
+    ]
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test:pack": "npm pack --dry-run --json",
+    "validate": "npm run typecheck && npm run test:pack"
+  },
+  "keywords": [
+    "pi",
+    "pi-package",
+    "pi-extension",
+    "answer",
+    "qna",
+    "questions"
+  ],
+  "author": "SteelDynamite",
+  "license": "Apache-2.0",
+  "peerDependencies": {
+    "@earendil-works/pi-ai": "*",
+    "@earendil-works/pi-coding-agent": "*",
+    "@earendil-works/pi-tui": "*"
+  },
+  "devDependencies": {
+    "@earendil-works/pi-ai": "^0.75.5",
+    "@earendil-works/pi-coding-agent": "^0.75.5",
+    "@earendil-works/pi-tui": "^0.75.5",
+    "typescript": "^5.9.0"
+  }
+}
