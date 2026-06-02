@@ -224,6 +224,104 @@ function parseExtractionResult(text: string): ExtractionResult | null {
 	return null;
 }
 
+async function extractQuestions(
+	ctx: ExtensionContext,
+	model: Model<Api>,
+	thinking: AnswerThinking,
+	lastAssistantText: string,
+	signal: AbortSignal,
+): Promise<ExtractionUiResult> {
+	const auth = await ctx.modelRegistry.getApiKeyAndHeaders(model);
+	if (!auth.ok) return { error: auth.error };
+
+	const userMessage: UserMessage = {
+		role: "user",
+		content: [{ type: "text", text: lastAssistantText }],
+		timestamp: Date.now(),
+	};
+
+	const response = await completeForExtraction(
+		model,
+		userMessage,
+		{ apiKey: auth.apiKey, headers: auth.headers },
+		signal,
+		thinking,
+	);
+
+	if (response.stopReason === "aborted") return null;
+	if (response.stopReason === "error") {
+		return { error: response.errorMessage ?? "Model returned an error." };
+	}
+
+	const responseText = response.content
+		.filter((c): c is { type: "text"; text: string } => c.type === "text")
+		.map((c) => c.text)
+		.join("\n");
+
+	const parsed = parseExtractionResult(responseText);
+	if (!parsed) {
+		const suffix = responseText.trim() ? `: ${truncateToWidth(responseText.trim(), 200)}` : ".";
+		return { error: `Model returned invalid extraction JSON${suffix}` };
+	}
+
+	return parsed;
+}
+
+function buildRpcAnswerPrefill(questions: ExtractedQuestion[]): string {
+	const parts = ["Answer the questions below. Edit as needed.", ""];
+	questions.forEach((question, index) => {
+		parts.push(`${index + 1}. ${question.question}`);
+		if (question.context) parts.push(`Context: ${question.context}`);
+		if (question.recommendedAnswer) parts.push(`Recommended: ${question.recommendedAnswer}`);
+		parts.push("Answer: ", "");
+	});
+	return parts.join("\n").trimEnd();
+}
+
+function sendAnswers(pi: ExtensionAPI, answers: string): void {
+	pi.sendMessage(
+		{
+			customType: "answers",
+			content: "I answered your questions in the following way:\n\n" + answers,
+			display: true,
+		},
+		{ triggerTurn: true },
+	);
+}
+
+function isUsableExtractionResult(extractionResult: ExtractionUiResult): extractionResult is ExtractionResult {
+	return extractionResult !== null && !isExtractionFailure(extractionResult) && extractionResult.questions.length > 0;
+}
+
+function reportExtractionProblem(ctx: ExtensionContext, extractionResult: ExtractionUiResult): void {
+	if (extractionResult === null) {
+		ctx.ui.notify("Cancelled", "info");
+	} else if (isExtractionFailure(extractionResult)) {
+		ctx.ui.notify(`Could not extract questions: ${extractionResult.error}`, "error");
+	} else if (extractionResult.questions.length === 0) {
+		ctx.ui.notify("No questions found in the last message", "info");
+	}
+}
+
+async function answerWithDialogFlow(
+	ctx: ExtensionContext,
+	pi: ExtensionAPI,
+	extractionResult: ExtractionUiResult,
+): Promise<void> {
+	if (!isUsableExtractionResult(extractionResult)) {
+		reportExtractionProblem(ctx, extractionResult);
+		return;
+	}
+
+	const answersResult = await ctx.ui.editor("Answer extracted questions", buildRpcAnswerPrefill(extractionResult.questions));
+	if (!answersResult?.trim()) {
+		ctx.ui.notify("Cancelled", "info");
+		return;
+	}
+
+	sendAnswers(pi, answersResult);
+}
+
 class QnAComponent implements Component {
 	private readonly questions: ExtractedQuestion[];
 	private readonly answers: string[];
@@ -581,7 +679,7 @@ export default function (pi: ExtensionAPI) {
 
 		const extractionModel = extractionSettings.model;
 		const extractionThinking = extractionSettings.thinking;
-		const extractionResult = await ctx.ui.custom<ExtractionUiResult>((tui, theme, _kb, done) => {
+		const extractionResult = await ctx.ui.custom<ExtractionUiResult | undefined>((tui, theme, _kb, done) => {
 			const loader = new BorderedLoader(
 				tui,
 				theme,
@@ -589,81 +687,46 @@ export default function (pi: ExtensionAPI) {
 			);
 			loader.onAbort = () => done(null);
 
-			const doExtract = async (): Promise<ExtractionUiResult> => {
-				const auth = await ctx.modelRegistry.getApiKeyAndHeaders(extractionModel);
-				if (!auth.ok) return { error: auth.error };
-
-				const userMessage: UserMessage = {
-					role: "user",
-					content: [{ type: "text", text: lastAssistantText }],
-					timestamp: Date.now(),
-				};
-
-				const response = await completeForExtraction(
-					extractionModel,
-					userMessage,
-					{ apiKey: auth.apiKey, headers: auth.headers },
-					loader.signal,
-					extractionThinking,
-				);
-
-				if (response.stopReason === "aborted") return null;
-				if (response.stopReason === "error") {
-					return { error: response.errorMessage ?? "Model returned an error." };
-				}
-
-				const responseText = response.content
-					.filter((c): c is { type: "text"; text: string } => c.type === "text")
-					.map((c) => c.text)
-					.join("\n");
-
-				const parsed = parseExtractionResult(responseText);
-				if (!parsed) {
-					const suffix = responseText.trim() ? `: ${truncateToWidth(responseText.trim(), 200)}` : ".";
-					return { error: `Model returned invalid extraction JSON${suffix}` };
-				}
-
-				return parsed;
-			};
-
-			doExtract()
+			extractQuestions(ctx, extractionModel, extractionThinking, lastAssistantText, loader.signal)
 				.then(done)
 				.catch((error) => done({ error: error instanceof Error ? error.message : String(error) }));
 			return loader;
 		});
 
-		if (extractionResult === null) {
-			ctx.ui.notify("Cancelled", "info");
+		if (extractionResult === undefined) {
+			ctx.ui.notify(`Extracting questions using ${formatModel(extractionModel)} (${extractionThinking})...`, "info");
+			const fallbackController = new AbortController();
+			const fallbackResult = await extractQuestions(
+				ctx,
+				extractionModel,
+				extractionThinking,
+				lastAssistantText,
+				fallbackController.signal,
+			);
+			await answerWithDialogFlow(ctx, pi, fallbackResult);
 			return;
 		}
 
-		if (isExtractionFailure(extractionResult)) {
-			ctx.ui.notify(`Could not extract questions: ${extractionResult.error}`, "error");
+		if (!isUsableExtractionResult(extractionResult)) {
+			reportExtractionProblem(ctx, extractionResult);
 			return;
 		}
 
-		if (extractionResult.questions.length === 0) {
-			ctx.ui.notify("No questions found in the last message", "info");
-			return;
-		}
-
-		const answersResult = await ctx.ui.custom<string | null>((tui, _theme, _kb, done) => {
+		const answersResult = await ctx.ui.custom<string | null | undefined>((tui, _theme, _kb, done) => {
 			return new QnAComponent(extractionResult.questions, tui, done);
 		});
+
+		if (answersResult === undefined) {
+			await answerWithDialogFlow(ctx, pi, extractionResult);
+			return;
+		}
 
 		if (answersResult === null) {
 			ctx.ui.notify("Cancelled", "info");
 			return;
 		}
 
-		pi.sendMessage(
-			{
-				customType: "answers",
-				content: "I answered your questions in the following way:\n\n" + answersResult,
-				display: true,
-			},
-			{ triggerTurn: true },
-		);
+		sendAnswers(pi, answersResult);
 	};
 
 	pi.registerCommand("answer", {
