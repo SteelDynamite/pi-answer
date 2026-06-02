@@ -267,15 +267,23 @@ async function extractQuestions(
 	return parsed;
 }
 
-function buildRpcAnswerPrefill(questions: ExtractedQuestion[]): string {
-	const parts = ["Answer the questions below. Edit as needed.", ""];
-	questions.forEach((question, index) => {
-		parts.push(`${index + 1}. ${question.question}`);
-		if (question.context) parts.push(`Context: ${question.context}`);
-		if (question.recommendedAnswer) parts.push(`Recommended: ${question.recommendedAnswer}`);
-		parts.push("Answer: ", "");
-	});
-	return parts.join("\n").trimEnd();
+function buildRpcQuestionTitle(question: ExtractedQuestion, index: number, total: number): string {
+	const parts = [`Question ${index + 1}/${total}`, "", question.question];
+	if (question.context) parts.push("", `Context: ${question.context}`);
+	return parts.join("\n");
+}
+
+function compileAnswers(questions: ExtractedQuestion[], answers: string[]): string {
+	const parts: string[] = [];
+	for (let i = 0; i < questions.length; i++) {
+		const question = questions[i];
+		const answer = answers[i]?.trim() || "(no answer)";
+		parts.push(`Q: ${question.question}`);
+		if (question.context) parts.push(`> ${question.context}`);
+		parts.push(`A: ${answer}`);
+		parts.push("");
+	}
+	return parts.join("\n").trim();
 }
 
 function sendAnswers(pi: ExtensionAPI, answers: string): void {
@@ -313,13 +321,21 @@ async function answerWithDialogFlow(
 		return;
 	}
 
-	const answersResult = await ctx.ui.editor("Answer extracted questions", buildRpcAnswerPrefill(extractionResult.questions));
-	if (!answersResult?.trim()) {
-		ctx.ui.notify("Cancelled", "info");
-		return;
+	const answers: string[] = [];
+	for (let i = 0; i < extractionResult.questions.length; i++) {
+		const question = extractionResult.questions[i];
+		const answer = await ctx.ui.editor(
+			buildRpcQuestionTitle(question, i, extractionResult.questions.length),
+			question.recommendedAnswer ?? "",
+		);
+		if (!answer?.trim()) {
+			ctx.ui.notify("Cancelled", "info");
+			return;
+		}
+		answers.push(answer);
 	}
 
-	sendAnswers(pi, answersResult);
+	sendAnswers(pi, compileAnswers(extractionResult.questions, answers));
 }
 
 class QnAComponent implements Component {
