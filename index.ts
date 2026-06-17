@@ -6,11 +6,11 @@
  */
 
 import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { complete, completeSimple, type Api, type Model, type ProviderStreamOptions, type UserMessage } from "@earendil-works/pi-ai";
-import type { ExtensionAPI, ExtensionContext, ModelRegistry } from "@earendil-works/pi-coding-agent";
-import { BorderedLoader, getAgentDir } from "@earendil-works/pi-coding-agent";
 import {
+	CancellableLoader,
 	type Component,
 	Editor,
 	type EditorTheme,
@@ -21,6 +21,62 @@ import {
 	visibleWidth,
 	wrapTextWithAnsi,
 } from "@earendil-works/pi-tui";
+
+interface ExtensionTheme {
+	fg(name: string, text: string): string;
+}
+
+interface ExtensionUI {
+	notify(message: string, level: "info" | "warning" | "error"): void;
+	select(title: string, options: string[]): Promise<string | undefined>;
+	editor(title: string, initialValue?: string): Promise<string | undefined>;
+	custom<T>(
+		factory: (tui: TUI, theme: ExtensionTheme, keybindings: unknown, done: (result: T) => void) => Component,
+	): Promise<T | undefined>;
+}
+
+interface ModelRegistry {
+	getAvailable(): Iterable<Model<Api>>;
+	find(provider: string, id: string): Model<Api> | undefined;
+	hasConfiguredAuth(model: Model<Api>): boolean;
+	getApiKeyAndHeaders(model: Model<Api>): Promise<
+		| { ok: true; apiKey?: string; headers?: Record<string, string> }
+		| { ok: false; error: string }
+	>;
+}
+
+interface SessionMessageContent {
+	type: string;
+	text?: string;
+}
+
+interface SessionMessage {
+	role?: string;
+	stopReason?: string;
+	content: SessionMessageContent[];
+}
+
+interface SessionEntry {
+	type: string;
+	message?: SessionMessage;
+}
+
+interface ExtensionContext {
+	hasUI: boolean;
+	ui: ExtensionUI;
+	model?: Model<Api>;
+	modelRegistry: ModelRegistry;
+	sessionManager: { getBranch(): SessionEntry[] };
+}
+
+interface ExtensionAPI {
+	sendMessage(
+		message: { customType: string; content: string; display?: boolean },
+		options?: { triggerTurn?: boolean },
+	): void;
+	registerCommand(name: string, options: { description: string; handler: (args: string, ctx: ExtensionContext) => unknown }): void;
+	registerShortcut(shortcut: string, options: { description: string; handler: (ctx: ExtensionContext) => unknown }): void;
+}
 
 interface ExtractedQuestion {
 	question: string;
@@ -87,6 +143,80 @@ interface ExtractionFailure {
 }
 
 type ExtractionUiResult = ExtractionResult | ExtractionFailure | null;
+
+function expandTilde(path: string): string {
+	if (path === "~") return homedir();
+	if (path.startsWith("~/")) return join(homedir(), path.slice(2));
+	return path;
+}
+
+function getAgentDir(): string {
+	const configured = process.env.PI_CODING_AGENT_DIR;
+	return configured ? expandTilde(configured) : join(homedir(), ".pi", "agent");
+}
+
+class ExtractionLoader implements Component {
+	private readonly loader: CancellableLoader;
+	private readonly theme: ExtensionTheme;
+	private cachedWidth?: number;
+	private cachedLines?: string[];
+
+	constructor(tui: TUI, theme: ExtensionTheme, message: string) {
+		this.theme = theme;
+		this.loader = new CancellableLoader(
+			tui,
+			(s) => theme.fg("accent", s),
+			(s) => theme.fg("muted", s),
+			message,
+		);
+	}
+
+	get signal(): AbortSignal {
+		return this.loader.signal;
+	}
+
+	set onAbort(fn: (() => void) | undefined) {
+		this.loader.onAbort = fn;
+	}
+
+	handleInput(data: string): void {
+		this.loader.handleInput(data);
+	}
+
+	dispose(): void {
+		this.loader.dispose();
+	}
+
+	invalidate(): void {
+		this.cachedWidth = undefined;
+		this.cachedLines = undefined;
+		this.loader.invalidate();
+	}
+
+	render(width: number): string[] {
+		if (this.cachedLines && this.cachedWidth === width) return this.cachedLines;
+
+		const boxWidth = Math.max(20, Math.min(width, 120));
+		const contentWidth = Math.max(1, boxWidth - 4);
+		const border = (s: string) => this.theme.fg("border", s);
+		const padToWidth = (line: string): string => line + " ".repeat(Math.max(0, width - visibleWidth(line)));
+		const boxLine = (content: string): string => {
+			const clipped = truncateToWidth(content, contentWidth);
+			return border("│") + " " + clipped + " ".repeat(Math.max(0, contentWidth - visibleWidth(clipped))) + " " + border("│");
+		};
+
+		const lines = [
+			padToWidth(border("╭" + "─".repeat(boxWidth - 2) + "╮")),
+			...this.loader.render(contentWidth).filter(Boolean).map((line) => padToWidth(boxLine(line))),
+			padToWidth(boxLine(this.theme.fg("dim", "Esc cancel"))),
+			padToWidth(border("╰" + "─".repeat(boxWidth - 2) + "╯")),
+		];
+
+		this.cachedWidth = width;
+		this.cachedLines = lines;
+		return lines;
+	}
+}
 
 function getSettingsPath(): string {
 	return join(getAgentDir(), "pi-answer.json");
@@ -663,9 +793,9 @@ export default function (pi: ExtensionAPI) {
 
 		for (let i = branch.length - 1; i >= 0; i--) {
 			const entry = branch[i];
-			if (entry.type !== "message") continue;
+			if (entry.type !== "message" || !entry.message) continue;
 			const msg = entry.message;
-			if (!("role" in msg) || msg.role !== "assistant") continue;
+			if (msg.role !== "assistant") continue;
 
 			if (msg.stopReason !== "stop") {
 				ctx.ui.notify(`Last assistant message incomplete (${msg.stopReason})`, "error");
@@ -696,7 +826,7 @@ export default function (pi: ExtensionAPI) {
 		const extractionModel = extractionSettings.model;
 		const extractionThinking = extractionSettings.thinking;
 		const extractionResult = await ctx.ui.custom<ExtractionUiResult | undefined>((tui, theme, _kb, done) => {
-			const loader = new BorderedLoader(
+			const loader = new ExtractionLoader(
 				tui,
 				theme,
 				`Extracting questions using ${formatModel(extractionModel)} (${extractionThinking})...`,
