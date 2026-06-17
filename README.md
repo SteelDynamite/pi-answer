@@ -29,7 +29,7 @@ Or press `Ctrl+.`.
 The extension:
 
 1. Finds the last completed assistant message.
-2. Uses a model to extract questions and optional recommended answers as JSON.
+2. Uses the current active model to extract questions and optional recommended answers as JSON.
 3. Opens an answer-entry flow.
 4. Sends your compiled answers back into the session.
 
@@ -37,17 +37,7 @@ In terminal Pi, `/answer` opens the rich interactive Q&A UI. It ghost-fills reco
 
 In RPC clients such as Paseo, `/answer` falls back to simple dialog cards. Extraction runs without the custom progress UI, then each question appears as a sequential editor/text card. Recommended answers are prefilled when supported. Cancelling a card, or submitting an empty answer, stops without sending compiled answers.
 
-Extraction defaults to the current model with thinking off.
-
-Run:
-
-```text
-/answer-settings
-```
-
-Use it to save a global extraction model and thinking level. Settings are stored in `~/.pi/agent/pi-answer.json`. If the saved model is unavailable or unauthenticated, `/answer` falls back to the current model.
-
-`/answer-settings` uses standard selection dialogs, so it works in terminal Pi and RPC clients such as Paseo.
+Extraction uses the current active model.
 
 ## Development
 

@@ -11,20 +11,17 @@ Operate within this repository only. Read `README.md`, `package.json`, and `inde
 Key product behavior to preserve:
 
 1. `/answer` and `Ctrl+.` find the last completed assistant message.
-2. The extension asks a model to extract questions and optional recommended answers as JSON.
+2. The extension asks the current active model to extract questions and optional recommended answers as JSON.
 3. The UI lets the user answer questions interactively and ghost-fills recommended answers when available.
 4. Right Arrow accepts a recommended answer.
 5. Compiled answers are sent back into the session.
-6. `/answer-settings` saves the extraction model and thinking level globally in `~/.pi/agent/pi-answer.json`.
-7. If the saved model is unavailable or unauthenticated, extraction falls back to the current model.
 
 Maintenance rules:
 
 1. Keep this as a Pi package/extension declared through `package.json#pi.extensions`.
 2. Keep package contents aligned with `package.json#files`.
 3. Document user-facing command, UI, config, or storage changes in `README.md`.
-4. Avoid changing persisted settings shape without a migration or backwards-compatible fallback.
-5. Treat model extraction output as untrusted; keep JSON parsing and fallback handling robust.
+4. Treat model extraction output as untrusted; keep JSON parsing and fallback handling robust.
 
 Validation:
 
