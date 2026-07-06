@@ -1,6 +1,7 @@
 ---
 description: Maintains the pi-answer interactive Q&A Pi extension
 manifest: true
+model: gpt-5.3-codex-spark
 resumable: true
 ---
 
