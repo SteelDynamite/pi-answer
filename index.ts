@@ -32,6 +32,7 @@ interface ExtensionUI {
 }
 
 interface ModelRegistry {
+	find(provider: string, modelId: string): Model<Api> | undefined;
 	getApiKeyAndHeaders(model: Model<Api>): Promise<
 		| { ok: true; apiKey?: string; headers?: Record<string, string> }
 		| { ok: false; error: string }
@@ -57,7 +58,6 @@ interface SessionEntry {
 interface ExtensionContext {
 	hasUI: boolean;
 	ui: ExtensionUI;
-	model?: Model<Api>;
 	modelRegistry: ModelRegistry;
 	sessionManager: { getBranch(): SessionEntry[] };
 }
@@ -117,6 +117,8 @@ Example output:
   ]
 }`;
 
+const EXTRACTION_MODEL_PROVIDER = "openai-codex";
+const EXTRACTION_MODEL_ID = "gpt-5.6-terra";
 const GHOST_CURSOR = "\x1b[7m \x1b[0m";
 const GHOST_STYLE = "\x1b[2;90m";
 const ANSI_RESET = "\x1b[0m";
@@ -617,12 +619,11 @@ export default function (pi: ExtensionAPI) {
 			return;
 		}
 
-		if (!ctx.model) {
-			ctx.ui.notify("No model selected", "error");
+		const extractionModel = ctx.modelRegistry.find(EXTRACTION_MODEL_PROVIDER, EXTRACTION_MODEL_ID);
+		if (!extractionModel) {
+			ctx.ui.notify(`Required model unavailable: ${EXTRACTION_MODEL_PROVIDER}/${EXTRACTION_MODEL_ID}`, "error");
 			return;
 		}
-
-		const extractionModel = ctx.model;
 		const extractionResult = await ctx.ui.custom<ExtractionUiResult | undefined>((tui, theme, _kb, done) => {
 			const loader = new ExtractionLoader(tui, theme, `Extracting questions using ${formatModel(extractionModel)}...`);
 			loader.onAbort = () => done(null);
