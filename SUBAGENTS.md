@@ -1,5 +1,5 @@
 ---
-description: Maintains the pi-answer interactive Q&A Pi extension
+description: Owns `/answer` and `Ctrl+.` flows that extract and validate questions from the last completed assistant message, collect terminal or RPC answers with recommended-answer support, and send compiled answers into the Pi session
 manifest: true
 resumable: true
 ---
