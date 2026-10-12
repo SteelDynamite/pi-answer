@@ -5,6 +5,7 @@
  * https://github.com/mitsuhiko/agent-stuff/blob/main/extensions/answer.ts
  */
 
+import { stripVTControlCharacters } from "node:util";
 import { complete, type Api, type Model, type UserMessage } from "@earendil-works/pi-ai";
 import {
 	CancellableLoader,
@@ -173,7 +174,7 @@ class ExtractionLoader implements Component {
 		const boxWidth = Math.max(20, Math.min(width, 120));
 		const contentWidth = Math.max(1, boxWidth - 4);
 		const border = (s: string) => this.theme.fg("border", s);
-		const padToWidth = (line: string): string => line + " ".repeat(Math.max(0, width - visibleWidth(line)));
+		const padToWidth = (line: string): string => truncateToWidth(line, width, "", true);
 		const boxLine = (content: string): string => {
 			const clipped = truncateToWidth(content, contentWidth);
 			return border("│") + " " + clipped + " ".repeat(Math.max(0, contentWidth - visibleWidth(clipped))) + " " + border("│");
@@ -204,6 +205,14 @@ function isExtractionFailure(result: ExtractionUiResult): result is ExtractionFa
 	return isRecord(result) && typeof result.error === "string";
 }
 
+function plainText(text: string): string {
+	// Model/provider text is not trusted terminal markup. Preserve only printable text and newlines.
+	return stripVTControlCharacters(text)
+		.replace(/\r\n?/g, "\n")
+		.replace(/\t/g, "   ")
+		.replace(/[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f]/g, "");
+}
+
 function parseExtractionResult(text: string): ExtractionResult | null {
 	try {
 		let jsonText = text;
@@ -216,10 +225,10 @@ function parseExtractionResult(text: string): ExtractionResult | null {
 		const questions: ExtractedQuestion[] = [];
 		for (const item of parsed.questions) {
 			if (!isRecord(item) || typeof item.question !== "string") continue;
-			const question: ExtractedQuestion = { question: item.question };
-			if (typeof item.context === "string" && item.context.trim()) question.context = item.context;
+			const question: ExtractedQuestion = { question: plainText(item.question) };
+			if (typeof item.context === "string" && item.context.trim()) question.context = plainText(item.context);
 			if (typeof item.recommendedAnswer === "string" && item.recommendedAnswer.trim()) {
-				question.recommendedAnswer = item.recommendedAnswer;
+				question.recommendedAnswer = plainText(item.recommendedAnswer);
 			}
 			questions.push(question);
 		}
@@ -308,7 +317,7 @@ function reportExtractionProblem(ctx: ExtensionContext, extractionResult: Extrac
 	if (extractionResult === null) {
 		ctx.ui.notify("Cancelled", "info");
 	} else if (isExtractionFailure(extractionResult)) {
-		ctx.ui.notify(`Could not extract questions: ${extractionResult.error}`, "error");
+		ctx.ui.notify(`Could not extract questions: ${plainText(extractionResult.error)}`, "error");
 	} else if (extractionResult.questions.length === 0) {
 		ctx.ui.notify("No questions found in the last message", "info");
 	}
@@ -577,7 +586,7 @@ function renderGhostSuggestionLines(lines: string[], width: number, text: string
 	const contentLineIndex = lines.length >= 3 ? 1 : lines.findIndex((line) => line.includes(GHOST_CURSOR));
 	if (contentLineIndex === -1) return lines;
 
-	const ghost = `${GHOST_STYLE}${truncateToWidth(text, Math.max(0, width - 1))}${ANSI_RESET}`;
+	const ghost = `${GHOST_STYLE}${truncateToWidth(text.replace(/\n/g, " "), Math.max(0, width - 1))}${ANSI_RESET}`;
 	const rendered = GHOST_CURSOR + ghost;
 	return lines.map((line, index) =>
 		index === contentLineIndex ? rendered + " ".repeat(Math.max(0, width - visibleWidth(rendered))) : line,
