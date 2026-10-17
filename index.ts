@@ -118,7 +118,7 @@ Example output:
   ]
 }`;
 
-const EXTRACTION_MODEL_PROVIDER = "openai-codex";
+const EXTRACTION_MODEL_PROVIDER = "openai";
 const EXTRACTION_MODEL_ID = "gpt-5.6-terra";
 const GHOST_CURSOR = "\x1b[7m \x1b[0m";
 const GHOST_STYLE = "\x1b[2;90m";

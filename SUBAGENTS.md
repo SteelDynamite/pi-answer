@@ -11,7 +11,7 @@ Operate within this repository only. Read `README.md`, `package.json`, and `inde
 Key product behavior to preserve:
 
 1. `/answer` and `Ctrl+.` find the last completed assistant message.
-2. The extension asks the current active model to extract questions and optional recommended answers as JSON.
+2. The extension always asks `openai/gpt-5.6-terra`, independent of the active session model, to extract questions and optional recommended answers as JSON. Use only the unified `openai` provider, with no provider/model fallback; preserve the registered transport API (including `openai-codex-responses`).
 3. The UI lets the user answer questions interactively and ghost-fills recommended answers when available.
 4. Right Arrow accepts a recommended answer.
 5. Compiled answers are sent back into the session.
@@ -25,4 +25,4 @@ Maintenance rules:
 
 Validation:
 
-Run `npm run validate` after changes when dependencies are installed. If validation cannot run, report why and what was checked instead.
+Use `npm ci` for the locked development dependencies, then run `npm run validate`. If validation cannot run, report why and what was checked instead. For provider changes, also probe the actual Pi extension loader and registry: direct Node imports do not exercise Pi's legacy completion compatibility mapping.

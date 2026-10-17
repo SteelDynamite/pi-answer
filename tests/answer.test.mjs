@@ -23,17 +23,17 @@ function load(api = {}) {
 const { parseExtractionResult, QnAComponent, ExtractionLoader } = load();
 const screen = { requestRender() {}, terminal: { rows: 40, columns: 80 } };
 const theme = { fg: (_name, text) => text };
-const model = { provider: "openai-codex", id: "gpt-5.6-terra" };
+const model = { provider: "openai", id: "gpt-5.6-terra", api: "openai-responses" };
 const question = { question: "Database?", context: "Choose one.", recommendedAnswer: "PostgreSQL" };
 const response = (text) => ({ stopReason: "stop", content: [{ type: "text", text }] });
 const extracted = (questions = [question]) => response(JSON.stringify({ questions }));
 const assistant = (text, stopReason = "stop") => ({ type: "message", message: { role: "assistant", stopReason, content: [{ type: "text", text }] } });
 
-function harness({ result = extracted(), branch = [assistant("Database?")], editors = ["PostgreSQL"], custom } = {}) {
-	const calls = { sends: [], notices: [], editors: [], requests: [], auth: 0 };
+function harness({ result = extracted(), branch = [assistant("Database?")], editors = ["PostgreSQL"], custom, registeredModel = model } = {}) {
+	const calls = { sends: [], notices: [], editors: [], requests: [], lookups: [], auth: 0 };
 	const registry = {
-		find: (provider, id) => { assert.deepEqual([provider, id], [model.provider, model.id]); return model; },
-		getApiKeyAndHeaders: async () => { calls.auth++; return { ok: true, apiKey: "test-key", headers: { test: "header" } }; },
+		find: (provider, id) => { calls.lookups.push([provider, id]); assert.deepEqual([provider, id], ["openai", "gpt-5.6-terra"]); return registeredModel; },
+		getApiKeyAndHeaders: async (receivedModel) => { assert.equal(receivedModel, registeredModel); calls.auth++; return { ok: true, apiKey: "test-key", headers: { test: "header" } }; },
 	};
 	const api = { complete: async (...args) => { calls.requests.push(args); return result; } };
 	const ctx = {
@@ -176,6 +176,33 @@ test("RPC submission passes resolved auth to module completion", async () => {
 	assert.equal(h.calls.sends[0][0].customType, "answers");
 	assert.equal(h.calls.sends[0][1].triggerTurn, true);
 	assert.match(h.calls.sends[0][0].content, /A: PostgreSQL$/);
+});
+for (const api of ["openai-responses", "openai-codex-responses"]) {
+	for (const entry of ["run", "shortcut"]) {
+		test(`${entry} uses fixed unified OpenAI model and preserves ${api} transport`, async () => {
+			const registeredModel = { ...model, api };
+			const h = harness({ registeredModel });
+			h.ctx.model = { provider: "anthropic", id: "session-model" };
+			await h[entry]();
+			assert.deepEqual(h.calls.lookups, [["openai", "gpt-5.6-terra"]]);
+			assert.equal(h.calls.requests.length, 1);
+			assert.equal(h.calls.requests[0][0], registeredModel);
+			assert.equal(h.calls.requests[0][0].api, api);
+			assert.equal(h.calls.auth, 1);
+			assert.match(h.calls.notices[0][0], /openai\/gpt-5\.6-terra/);
+			assert.equal(h.calls.sends.length, 1);
+		});
+	}
+}
+test("missing fixed OpenAI model reports error without provider or model fallback", async () => {
+	const h = harness({ registeredModel: null });
+	await h.run();
+	assert.deepEqual(h.calls.lookups, [["openai", "gpt-5.6-terra"]]);
+	assert.deepEqual(h.calls.notices, [["Required model unavailable: openai/gpt-5.6-terra", "error"]]);
+	assert.equal(h.calls.auth, 0);
+	assert.equal(h.calls.requests.length, 0);
+	assert.equal(h.calls.editors.length, 0);
+	assert.equal(h.calls.sends.length, 0);
 });
 test("auth failure does not invoke model", async () => {
 	const h = harness();

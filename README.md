@@ -29,7 +29,7 @@ Or press `Ctrl+.`.
 The extension:
 
 1. Finds the last completed assistant message.
-2. Uses `openai-codex/gpt-5.6-terra` to extract questions and optional recommended answers as JSON.
+2. Uses `openai/gpt-5.6-terra` to extract questions and optional recommended answers as JSON.
 3. Opens an answer-entry flow.
 4. Sends your compiled answers back into the session.
 
@@ -39,12 +39,14 @@ Extracted text is treated as plain text: terminal control sequences are removed.
 
 In RPC clients such as Paseo, `/answer` falls back to simple dialog cards. Extraction runs without the custom progress UI, then each question appears as a sequential editor/text card. Recommended answers are prefilled when supported. Cancelling a card, or submitting an empty answer, stops without sending compiled answers.
 
-Extraction always uses `openai-codex/gpt-5.6-terra`, independent of the session model. Configure OpenAI Codex authentication in Pi before using `/answer`.
+Extraction always uses `openai/gpt-5.6-terra`, independent of the session model. Use a Pi host with the unified `openai` provider and configure its authentication through `/login openai` (ChatGPT subscription or API key), or `OPENAI_API_KEY`. The model must be registered under `openai`; if unavailable, `/answer` reports an error without selecting another provider or model.
+
+Provider IDs and transport APIs are distinct: the extension preserves the registered model's transport, including `openai-codex-responses` when configured. That transport name is not a provider ID.
 
 ## Development
 
 ```bash
-npm install
+npm ci
 npm run validate
 ```
 
